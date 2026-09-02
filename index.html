@@ -406,10 +406,9 @@ async function renderGallery() {
 
   const howto = document.createElement('div');
   howto.className = 'howto';
-  howto.innerHTML = '<b>Adding templates</b>' +
+  howto.innerHTML = '<b>Overland Design Team</b>' +
     '<span>Design in InDesign, run the <b>Export Template</b> script, then add the exported ' +
-    'folder here. Publish gives you the updated site' +
-    (window.claude ? ' — live for everyone at this same link.' : ' as <b>index.html</b> — upload it to the web host to go live.') + '</span>';
+    'folder here. Publishing updates this site for everyone.</span>';
   howto.appendChild(mkBtn('Manage templates', openManage));
   grid.appendChild(howto);
 
@@ -849,6 +848,57 @@ function buildPdf(pages) {
 const SIZE_LIMIT = 15.5 * 1024 * 1024;   // host cap is 16 MiB; leave headroom
 const M = { removed: new Set(), parsed: null, name: '', split: false, fonts: [] };
 
+// Where the public site lives. On GitHub Pages, Publish writes index.html to this
+// repo with the design team's own access token (kept only in their browser).
+const GH = { owner: 'cadewindebank', repo: 'template-shelf', branch: 'main', path: 'index.html' };
+const isGitHubHosted = () => !window.claude && /^https?:$/.test(location.protocol) &&
+  !/^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+function ghToken() { try { return localStorage.getItem('shelf:gh-token') || ''; } catch (e) { return ''; } }
+function setGhToken(t) {
+  try { if (t) localStorage.setItem('shelf:gh-token', t); else localStorage.removeItem('shelf:gh-token'); } catch (e) {}
+}
+function toBase64(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000)
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+async function publishToGitHub(html, statusEl) {
+  const token = ghToken();
+  if (!token) {
+    statusEl.className = 'status err';
+    statusEl.textContent = 'Add the design-team access token above first.';
+    return;
+  }
+  const api = 'https://api.github.com/repos/' + GH.owner + '/' + GH.repo;
+  const headers = { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json',
+                    'X-GitHub-Api-Version': '2022-11-28' };
+  const fail = msg => { statusEl.className = 'status err'; statusEl.textContent = msg; };
+  statusEl.className = 'status'; statusEl.textContent = 'Publishing to the live site…';
+  try {
+    const treeRes = await fetch(api + '/git/trees/' + GH.branch, { headers });
+    if (treeRes.status === 401) return fail('GitHub rejected the access token — create a new one and save it above.');
+    if (treeRes.status === 404) return fail('The token can’t see the site repo — it needs access to ' + GH.owner + '/' + GH.repo + '.');
+    if (!treeRes.ok) return fail('GitHub error ' + treeRes.status + ' while reading the site. Try again in a moment.');
+    const entry = ((await treeRes.json()).tree || []).find(t => t.path === GH.path);
+    const body = { message: 'Update templates via Template Shelf', content: toBase64(html), branch: GH.branch };
+    if (entry) body.sha = entry.sha;
+    const put = await fetch(api + '/contents/' + GH.path, {
+      method: 'PUT', headers: Object.assign({ 'Content-Type': 'application/json' }, headers), body: JSON.stringify(body)
+    });
+    if (put.status === 401) return fail('GitHub rejected the access token — create a new one and save it above.');
+    if (put.status === 403 || put.status === 404) return fail('The token isn’t allowed to write to the site repo — it needs “Contents: Read and write” on ' + GH.repo + '.');
+    if (put.status === 409) return fail('The site changed while you were editing — reload and publish again.');
+    if (!put.ok) return fail('GitHub error ' + put.status + ' while publishing. Try again in a moment.');
+    statusEl.textContent = 'Published! GitHub is rebuilding the site — it goes live in about a minute. This page will reload itself.';
+    setTimeout(() => location.reload(), 75000);
+  } catch (e) {
+    fail('Could not reach GitHub (' + (e && e.message || 'network error') + '). Check your connection and try again.');
+  }
+}
+
 function buildSiteHTML(gallery) {
   const json = JSON.stringify(gallery).replace(/<\/script/gi, '<\\/script');
   const fontsJson = JSON.stringify(fontPool()).replace(/<\/script/gi, '<\\/script');
@@ -953,9 +1003,37 @@ function openManage() {
 }
 
 function renderManage(box, bg) {
-  box.innerHTML = '<h3>Manage templates</h3>' +
+  box.innerHTML = '<h3>Manage templates <span class="hint" style="font-weight:500">· Overland Design Team only</span></h3>' +
     '<div class="sub">Add a folder exported by the <b>Export Template</b> script in InDesign, or remove templates. ' +
-    'Publishing replaces the live site for everyone at this same link. Only people with edit access can publish.</div>';
+    'Publishing replaces the live site for everyone at this same link.</div>';
+
+  if (isGitHubHosted()) {
+    const s0 = document.createElement('div'); s0.className = 'sect'; s0.textContent = 'Design team access';
+    box.appendChild(s0);
+    const acc = document.createElement('div'); acc.className = 'addbox';
+    if (ghToken()) {
+      const row = document.createElement('div'); row.className = 'mrow';
+      const ok = document.createElement('span'); ok.className = 'grow';
+      ok.textContent = 'Publishing is set up on this device.';
+      row.appendChild(ok);
+      row.appendChild(mkBtn('Forget token', () => { setGhToken(''); renderManage(box, bg); }));
+      acc.appendChild(row);
+    } else {
+      const hint = document.createElement('div'); hint.className = 'sub';
+      hint.innerHTML = 'Paste a GitHub access token to publish from this device. Create one at ' +
+        '<b>github.com → Settings → Developer settings → Fine-grained tokens</b>: repository access <b>only ' +
+        GH.repo + '</b>, permission <b>Contents: Read and write</b>. It stays in this browser only.';
+      acc.appendChild(hint);
+      const row = document.createElement('div'); row.className = 'mrow';
+      const inp = document.createElement('input'); inp.type = 'password'; inp.placeholder = 'github_pat_…';
+      inp.style.cssText = 'flex:1;font:inherit;font-size:13px;padding:7px 10px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--ink)';
+      inp.autocomplete = 'off';
+      row.appendChild(inp);
+      row.appendChild(mkBtn('Save', () => { if (inp.value.trim()) { setGhToken(inp.value.trim()); renderManage(box, bg); } }, true));
+      acc.appendChild(row);
+    }
+    box.appendChild(acc);
+  }
 
   const s1 = document.createElement('div'); s1.className = 'sect'; s1.textContent = 'On the shelf now';
   box.appendChild(s1);
@@ -1094,7 +1172,12 @@ function renderManage(box, bg) {
       sum.className = 'status err';
       sum.textContent += ' · No font file for ' + missing.join(', ') + ' — text will show in a substitute font until you add one.';
     }
-    pub.disabled = tooBig || !(M.removed.size > 0 || M.parsed);
+    const needsToken = isGitHubHosted() && !ghToken();
+    if (needsToken && (M.removed.size > 0 || M.parsed)) {
+      sum.className = 'status err';
+      sum.textContent += ' · Save the design-team access token above to publish.';
+    }
+    pub.disabled = tooBig || needsToken || !(M.removed.size > 0 || M.parsed);
   }
   refreshSummary();
 }
@@ -1104,7 +1187,8 @@ async function publishSite(html, statusEl) {
   let ns = null;
   try { if (window.claude && window.claude.use) ns = await window.claude.use('artifact'); } catch (e) {}
   if (!ns) {
-    // Hosted as a plain website: hand back the rebuilt site as index.html to upload to the host.
+    if (isGitHubHosted()) return publishToGitHub(html, statusEl);
+    // Opened as a local file: hand back the rebuilt site as index.html instead.
     await saveFile('index.html', new Blob([html], { type: 'text/html' }));
     statusEl.textContent = 'Downloaded the updated site as index.html — upload it to your website host to make it live.';
     return;
